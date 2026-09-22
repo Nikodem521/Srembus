@@ -98,12 +98,35 @@
   function render() {
     const route = currentRoute();
     updateTabbar(route.name);
-    if (route.name === "home") return renderHome();
-    if (route.name === "stop") return renderStop(route.param);
-    if (route.name === "line") return renderLine(route.param);
-    if (route.name === "lines") return renderLines();
-    if (route.name === "settings") return renderSettings();
-    return renderHome();
+    if (route.name === "home") renderHome();
+    else if (route.name === "stop") renderStop(route.param);
+    else if (route.name === "line") renderLine(route.param);
+    else if (route.name === "lines") renderLines();
+    else if (route.name === "settings") renderSettings();
+    else renderHome();
+    playViewTransition();
+    positionSegmentedIndicators();
+  }
+
+  // Ekran "wjeżdża" przy każdej zmianie — retrigger animacji przez
+  // usunięcie i ponowne dodanie klasy (sama zmiana innerHTML tego nie zrobi).
+  function playViewTransition() {
+    view.classList.remove("view-enter");
+    void view.offsetWidth;
+    view.classList.add("view-enter");
+  }
+
+  // Przesuwająca się "pigułka" pod aktywną opcją segmentowanej kontrolki
+  // (dzień roboczy/sobota, jasny/ciemny) — mierzymy pozycję aktywnego
+  // przycisku i przesuwamy wskaźnik transformem, żeby CSS mógł to animować.
+  function positionSegmentedIndicators() {
+    document.querySelectorAll(".segmented").forEach((seg) => {
+      const indicator = seg.querySelector(".segmented-indicator");
+      const active = seg.querySelector("button.is-active");
+      if (!indicator || !active) return;
+      indicator.style.width = `${active.offsetWidth}px`;
+      indicator.style.transform = `translateX(${active.offsetLeft}px)`;
+    });
   }
 
   function updateTabbar(routeName) {
@@ -111,9 +134,19 @@
     tabs.forEach((btn) => {
       btn.classList.toggle("is-active", map[routeName] === btn.dataset.tab);
     });
+    const indicator = document.querySelector(".tabbar-indicator");
+    const activeBtn = document.querySelector(".tabbar button.is-active");
+    if (indicator && activeBtn) {
+      indicator.style.width = `${activeBtn.offsetWidth}px`;
+      indicator.style.transform = `translateX(${activeBtn.offsetLeft}px)`;
+    }
   }
 
   window.addEventListener("hashchange", render);
+  window.addEventListener("resize", () => {
+    positionSegmentedIndicators();
+    updateTabbar(currentRoute().name);
+  });
 
   // ---------------------------------------------------------------------
   // Wspólne fragmenty UI
@@ -127,6 +160,7 @@
   const iconSearch = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="18" height="18"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3" stroke-linecap="round"/></svg>`;
   const iconChevron = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M9 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
   const iconSwap = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" width="20" height="20"><path d="M7 4v13M7 17l-3-3M7 17l3-3M17 20V7M17 7l-3 3M17 7l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  const iconClose = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" width="14" height="14"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>`;
 
   function header(title, { back = false, fav = null } = {}) {
     return `
@@ -149,6 +183,7 @@
     if (options.length < 2) return "";
     return `
       <div class="segmented" role="tablist" aria-label="Wybór dnia">
+        <span class="segmented-indicator"></span>
         ${options
           .map(
             (o) => `
@@ -172,9 +207,10 @@
   // ---------------------------------------------------------------------
   // Ekran: Start
   // ---------------------------------------------------------------------
-  let homeQuery = "";
-  let homeToQuery = "";
-  let homeConnDayType = null;
+  let journeyFrom = null; // wybrany przystanek początkowy (dokładna nazwa) lub null
+  let journeyTo = null; // wybrany przystanek docelowy lub null
+  let journeyQuery = ""; // tekst aktualnie wpisywany w polu Skąd/Dokąd
+  let journeyDayType = null;
 
   function renderHome() {
     const favs = Storage.getFavorites();
@@ -184,69 +220,101 @@
       <header class="topbar topbar--brand">
         <h1>Śremskie autobusy</h1>
       </header>
-      <div class="search-wrap">
-        <span class="search-icon">${iconSearch}</span>
-        <input id="from-search" type="search" inputmode="search" autocomplete="off"
-               placeholder="Skąd jedziesz?" value="${escapeAttr(homeQuery)}"
-               aria-label="Skąd jedziesz">
+      ${renderQuickAccess(favs, recents)}
+      <div class="section">
+        <h2 class="section-title">Zaplanuj podróż</h2>
+        <div id="journey-panel">${renderJourneyStep()}</div>
       </div>
-      <div class="search-wrap search-wrap--to">
-        <span class="search-icon">${iconSearch}</span>
-        <input id="to-search" type="search" inputmode="search" autocomplete="off"
-               placeholder="Dokąd jedziesz? (opcjonalnie)" value="${escapeAttr(homeToQuery)}"
-               aria-label="Dokąd jedziesz">
+      <div class="section">
+        <button class="list-row list-row--link glass" data-action="go" data-href="#/lines">
+          <span>Wszystkie linie</span>
+          <span class="chev">${iconChevron}</span>
+        </button>
       </div>
-      <div id="home-results">${renderHomeResults(favs, recents)}</div>
     `;
-
-    document.getElementById("from-search").addEventListener("input", (e) => {
-      homeQuery = e.target.value;
-      refreshHomeResults();
-    });
-    document.getElementById("to-search").addEventListener("input", (e) => {
-      homeToQuery = e.target.value;
-      refreshHomeResults();
-    });
-    // Nie chwytamy fokusu automatycznie — na iOS wywołałoby to klawiaturę
-    // natychmiast po wejściu, co bywa irytujące przy szybkim zerknięciu na ulubione.
+    wireJourneyInput();
   }
 
-  function refreshHomeResults() {
-    const favs = Storage.getFavorites();
-    const recents = Storage.getRecents().filter((n) => !favs.includes(n));
-    document.getElementById("home-results").innerHTML = renderHomeResults(favs, recents);
+  function renderQuickAccess(favs, recents) {
+    if (!favs.length && !recents.length) return "";
+    const favSection = favs.length ? section("Ulubione przystanki", favs.map(stopRow).join("")) : "";
+    const recentSection = recents.length ? section("Ostatnio sprawdzane", recents.map(stopRow).join("")) : "";
+    return favSection + recentSection;
   }
 
-  function renderHomeResults(favs, recents) {
-    // Dopóki pole "Dokąd" jest puste, wszystko działa dokładnie jak wcześniej:
-    // wyszukiwanie jednego przystanku, dotknięcie od razu pokazuje jego rozkład.
-    if (homeToQuery.trim() === "") {
-      return homeQuery ? renderSearchResults(homeQuery) : renderBrowseSections(favs, recents);
+  // Sekwencja jest teraz wymuszona: najpierw Skąd, potem Dokąd — bez trybu
+  // "opcjonalnego", który wcześniej mylił dotknięcia podpowiedzi.
+  function renderJourneyStep() {
+    if (!journeyFrom) {
+      return journeyPicker("from", "Skąd jedziesz?");
     }
-    // Od momentu, gdy w polu "Dokąd" pojawi się choć jeden znak, oba pola
-    // służą do wybrania pary przystanków — dotknięcie podpowiedzi tylko
-    // wypełnia pole, aż oba będą dokładnymi nazwami przystanków.
-    const fromExact = ALL_STOP_NAMES.includes(homeQuery);
-    if (!fromExact) {
-      return renderPickList(homeQuery, "from", "Wybierz przystanek początkowy");
+    if (!journeyTo) {
+      return journeyChipRow() + journeyPicker("to", "Dokąd jedziesz?");
     }
-    const toExact = ALL_STOP_NAMES.includes(homeToQuery);
-    if (!toExact) {
-      return renderPickList(homeToQuery, "to", "Wybierz przystanek docelowy");
-    }
-    if (homeQuery === homeToQuery) {
-      return emptyState("To ten sam przystanek", "Wybierz dwa różne przystanki, żeby zobaczyć połączenia.");
-    }
-    return renderConnections(homeQuery, homeToQuery);
+    return journeyChipRow() + renderConnectionsBody(journeyFrom, journeyTo);
   }
 
-  function renderPickList(query, field, title) {
-    const q = fold(query.trim());
-    const matches = ALL_STOP_NAMES.filter((name) => fold(name).includes(q));
+  function journeyChipRow() {
+    return `
+      <div class="journey-chips">
+        <button class="journey-chip" data-action="journey-edit" data-field="from">
+          <span class="journey-chip-label">Skąd</span>
+          <span class="journey-chip-value">${escapeHtml(journeyFrom)}</span>
+        </button>
+        ${
+          journeyTo
+            ? `<button class="journey-chip" data-action="journey-edit" data-field="to">
+                 <span class="journey-chip-label">Dokąd</span>
+                 <span class="journey-chip-value">${escapeHtml(journeyTo)}</span>
+               </button>
+               <button class="icon-btn journey-swap" data-action="swap-stops" aria-label="Zamień kierunek">${iconSwap}</button>`
+            : ""
+        }
+      </div>`;
+  }
+
+  // WAŻNE dla klawiatury na iOS: przy pisaniu aktualizujemy WYŁĄCZNIE listę
+  // podpowiedzi (#journey-suggestions). Pole <input> nigdy nie jest tworzone
+  // od nowa w trakcie pisania — inaczej Safari uznaje je za nowy element,
+  // traci fokus i klawiatura się chowa po każdym znaku.
+  function journeyPicker(field, placeholder) {
+    return `
+      <div class="search-wrap glass">
+        <span class="search-icon">${iconSearch}</span>
+        <input id="journey-input" type="text" inputmode="search" autocomplete="off"
+               autocorrect="off" autocapitalize="off" spellcheck="false"
+               placeholder="${placeholder}" value="${escapeAttr(journeyQuery)}"
+               aria-label="${placeholder}">
+        <button type="button" class="clear-btn ${journeyQuery ? "" : "is-hidden"}"
+                data-action="clear-journey-input" aria-label="Wyczyść">${iconClose}</button>
+      </div>
+      <div id="journey-suggestions">${renderJourneySuggestions(field)}</div>`;
+  }
+
+  function renderJourneySuggestions(field) {
+    if (journeyQuery.trim() === "") return "";
+    const q = fold(journeyQuery.trim());
+    const matches = ALL_STOP_NAMES.filter((n) => fold(n).includes(q));
     if (matches.length === 0) {
-      return emptyState(`Nie znaleziono „${escapeHtml(query)}”`, "Sprawdź pisownię przystanku.");
+      return emptyState(`Nie znaleziono „${escapeHtml(journeyQuery)}”`, "Sprawdź pisownię przystanku.");
     }
-    return section(title, matches.map((n) => selectRow(n, field)).join(""));
+    return section(
+      field === "from" ? "Wybierz przystanek początkowy" : "Wybierz przystanek docelowy",
+      matches.map((n) => selectRow(n, field)).join("")
+    );
+  }
+
+  function wireJourneyInput() {
+    const input = document.getElementById("journey-input");
+    if (!input) return;
+    const field = journeyFrom ? "to" : "from";
+    input.addEventListener("input", (e) => {
+      journeyQuery = e.target.value;
+      const sugg = document.getElementById("journey-suggestions");
+      if (sugg) sugg.innerHTML = renderJourneySuggestions(field);
+      const clearBtn = input.parentElement.querySelector(".clear-btn");
+      if (clearBtn) clearBtn.classList.toggle("is-hidden", journeyQuery.length === 0);
+    });
   }
 
   function selectRow(name, field) {
@@ -293,16 +361,16 @@
     return results;
   }
 
-  function renderConnections(fromName, toName) {
+  function renderConnectionsBody(fromName, toName) {
     const today = TimeUtils.dayTypeForDate();
     const conns = findDirectConnections(fromName, toName);
     const availableDayTypes = Array.from(new Set(conns.map((c) => c.dayType)));
-    if (!homeConnDayType || !availableDayTypes.includes(homeConnDayType)) {
-      homeConnDayType = availableDayTypes.includes(today) ? today : availableDayTypes[0];
+    if (!journeyDayType || !availableDayTypes.includes(journeyDayType)) {
+      journeyDayType = availableDayTypes.includes(today) ? today : (availableDayTypes[0] || "workday");
     }
-    const dayConns = conns.filter((c) => c.dayType === homeConnDayType);
+    const dayConns = conns.filter((c) => c.dayType === journeyDayType);
     const nowMin = TimeUtils.nowMinutes();
-    const isToday = homeConnDayType === today;
+    const isToday = journeyDayType === today;
 
     const withTimes = dayConns
       .map((c) => ({ c, mins: TimeUtils.toMinutes(c.dep) }))
@@ -310,27 +378,21 @@
     const heroItem = isToday ? withTimes.find((x) => x.mins >= nowMin) : null;
 
     return `
-      <div class="conn-header">
-        <span>${escapeHtml(fromName)}</span>
-        <span class="conn-arrow">→</span>
-        <span>${escapeHtml(toName)}</span>
-        <button class="icon-btn" data-action="swap-stops" aria-label="Zamień kierunek">${iconSwap}</button>
-      </div>
       ${today === "unavailable" ? unavailableBanner() : ""}
-      ${dayTypeSwitcher(homeConnDayType, availableDayTypes.length ? availableDayTypes : ["workday"])}
+      ${dayTypeSwitcher(journeyDayType, availableDayTypes.length ? availableDayTypes : ["workday"])}
       ${
         conns.length === 0
           ? emptyState(
               "Brak bezpośredniego połączenia",
-              "Żadna linia w tym rozkładzie nie jedzie wprost między tymi przystankami — może być potrzebna przesiadka. Sprawdź oba przystanki osobno."
+              "Żadna linia w tym rozkładzie nie jedzie wprost między tymi przystankami — może być potrzebna przesiadka."
             )
           : withTimes.length === 0
-          ? emptyState("Brak kolejnych kursów dziś", "Wybierz inny dzień powyżej albo sprawdź przystanki osobno.")
+          ? emptyState("Brak kolejnych kursów dziś", "Wybierz inny dzień powyżej.")
           : `
         ${heroItem ? connHero(heroItem.c, heroItem.mins) : ""}
         <div class="section">
           <h2 class="section-title">Wszystkie połączenia</h2>
-          <div class="list">
+          <div class="list glass">
             ${withTimes.map(({ c, mins }) => connRow(c, mins, isToday, nowMin)).join("")}
           </div>
         </div>`
@@ -366,53 +428,11 @@
       </button>`;
   }
 
-  function renderBrowseSections(favs, recents) {
-    const favSection = favs.length
-      ? section("Ulubione przystanki", favs.map(stopRow).join(""))
-      : "";
-    const recentSection = recents.length
-      ? section("Ostatnio wyszukiwane", recents.map(stopRow).join(""))
-      : "";
-    const nothingYet = !favs.length && !recents.length;
-
-    return `
-      ${favSection}
-      ${recentSection}
-      ${
-        nothingYet
-          ? emptyState(
-              "Zacznij od wyszukania przystanku",
-              "Np. „Farna” albo „Piłsudskiego”. Ulubione i ostatnio sprawdzane przystanki pojawią się tutaj."
-            )
-          : ""
-      }
-      <div class="section">
-        <button class="list-row list-row--link" data-action="go" data-href="#/lines">
-          <span>Wszystkie linie</span>
-          <span class="chev">${iconChevron}</span>
-        </button>
-      </div>
-    `;
-  }
-
-  function renderSearchResults(query) {
-    const q = fold(query.trim());
-    const matches = ALL_STOP_NAMES.filter((name) => fold(name).includes(q));
-    if (matches.length === 0) {
-      return emptyState(
-        `Nie znaleziono „${escapeHtml(query)}”`,
-        "Sprawdź pisownię albo przejrzyj rozkład po liniach.",
-        `<button class="btn-secondary" data-action="go" data-href="#/lines">Wszystkie linie</button>`
-      );
-    }
-    return section(`Przystanki (${matches.length})`, matches.map(stopRow).join(""));
-  }
-
   function section(title, innerHtml) {
     return `
       <div class="section">
         <h2 class="section-title">${title}</h2>
-        <div class="list">${innerHtml}</div>
+        <div class="list glass">${innerHtml}</div>
       </div>`;
   }
 
@@ -582,6 +602,7 @@
     const dirSwitcher =
       line.directions.length > 1
         ? `<div class="segmented" role="tablist" aria-label="Kierunek">
+            <span class="segmented-indicator"></span>
             ${line.directions
               .map(
                 (d, i) => `
@@ -679,6 +700,7 @@
       <div class="section">
         <h2 class="section-title">Wygląd</h2>
         <div class="segmented segmented--full" role="tablist" aria-label="Motyw">
+          <span class="segmented-indicator"></span>
           ${[
             { key: "system", label: "System" },
             { key: "light", label: "Jasny" },
@@ -743,20 +765,43 @@
       const nowFav = Storage.toggleFavorite(name);
       el.classList.toggle("is-fav", nowFav);
       el.innerHTML = iconHeart(nowFav);
+      el.classList.remove("pop");
+      void el.offsetWidth;
+      el.classList.add("pop");
     } else if (action === "set-daytype") {
       const route = currentRoute();
       if (route.name === "stop") stopDayType = el.dataset.daytype;
-      else if (route.name === "home") homeConnDayType = el.dataset.daytype;
+      else if (route.name === "home") journeyDayType = el.dataset.daytype;
       else lineDayType = el.dataset.daytype;
       render();
+    } else if (action === "clear-journey-input") {
+      journeyQuery = "";
+      const input = document.getElementById("journey-input");
+      if (input) input.value = "";
+      el.classList.add("is-hidden");
+      const sugg = document.getElementById("journey-suggestions");
+      if (sugg) sugg.innerHTML = renderJourneySuggestions(journeyFrom ? "to" : "from");
+      if (input) input.focus();
     } else if (action === "select-stop") {
-      if (el.dataset.field === "from") homeQuery = el.dataset.name;
-      else homeToQuery = el.dataset.name;
+      journeyQuery = "";
+      if (el.dataset.field === "from") journeyFrom = el.dataset.name;
+      else journeyTo = el.dataset.name;
+      render();
+    } else if (action === "journey-edit") {
+      journeyQuery = "";
+      journeyDayType = null;
+      if (el.dataset.field === "from") {
+        journeyFrom = null;
+        journeyTo = null;
+      } else {
+        journeyTo = null;
+      }
       render();
     } else if (action === "swap-stops") {
-      const tmp = homeQuery;
-      homeQuery = homeToQuery;
-      homeToQuery = tmp;
+      const tmp = journeyFrom;
+      journeyFrom = journeyTo;
+      journeyTo = tmp;
+      journeyDayType = null;
       render();
     } else if (action === "set-dir") {
       lineDirIdx = parseInt(el.dataset.dir, 10);
